@@ -22,18 +22,18 @@ struct ConversationMessage: Identifiable, Hashable, Codable {
 }
 
 enum ConversationLengthOption: String, CaseIterable, Identifiable {
-    case fifty = "50 each"
-    case hundred = "100 each"
-    case twoHundred = "200 each"
+    case five = "5 each"
+    case ten = "10 each"
+    case twentyFive = "25 each"
     case custom = "Custom"
 
     var id: String { rawValue }
 
     var fixedValue: Int? {
         switch self {
-        case .fifty: return 50
-        case .hundred: return 100
-        case .twoHundred: return 200
+        case .five: return 5
+        case .ten: return 10
+        case .twentyFive: return 25
         case .custom: return nil
         }
     }
@@ -63,8 +63,8 @@ final class ConversationViewModel: ObservableObject {
     @Published var messages: [ConversationMessage] = []
     @Published var isRunning = false
     @Published var statusText = "Idle"
-    @Published var lengthOption: ConversationLengthOption = .fifty
-    @Published var customMessageLimitInput = "150"
+    @Published var lengthOption: ConversationLengthOption = .ten
+    @Published var customMessageLimitInput = "10"
     @Published var transcriptRevision = 0
 
     private var shouldStop = false
@@ -135,10 +135,27 @@ final class ConversationViewModel: ObservableObject {
         formatPopup.selectItem(at: 0)
 
         let formatLabel = NSTextField(labelWithString: "Format:")
-        let accessory = NSStackView(views: [formatLabel, formatPopup])
-        accessory.orientation = .horizontal
-        accessory.alignment = .centerY
-        accessory.spacing = 8
+        let leadingSpacer = NSView(frame: .zero)
+        leadingSpacer.translatesAutoresizingMaskIntoConstraints = false
+        leadingSpacer.widthAnchor.constraint(equalToConstant: 12).isActive = true
+
+        let row = NSStackView(views: [leadingSpacer, formatLabel, formatPopup])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 8
+
+        let topSpacer = NSView(frame: .zero)
+        topSpacer.translatesAutoresizingMaskIntoConstraints = false
+        topSpacer.heightAnchor.constraint(equalToConstant: 6).isActive = true
+
+        let bottomSpacer = NSView(frame: .zero)
+        bottomSpacer.translatesAutoresizingMaskIntoConstraints = false
+        bottomSpacer.heightAnchor.constraint(equalToConstant: 6).isActive = true
+
+        let accessory = NSStackView(views: [topSpacer, row, bottomSpacer])
+        accessory.orientation = .vertical
+        accessory.alignment = .leading
+        accessory.spacing = 0
         panel.accessoryView = accessory
 
         guard panel.runModal() == .OK, let url = panel.url else {
@@ -336,9 +353,54 @@ final class ConversationViewModel: ObservableObject {
             nextSpeaker = (nextSpeaker == .left) ? .right : .left
         }
 
+        await appendFinalSummaries(topic: topic, transcript: transcript)
         appendMessage(.init(role: .system, speaker: .system, text: "Conversation completed. Left posted \(leftPosts), right posted \(rightPosts)."))
         statusText = "Completed"
         isRunning = false
+    }
+
+    private func appendFinalSummaries(topic: String, transcript: [ConversationMessage]) async {
+        let speakers: [(ConversationMessage.Speaker, String)] = [(.left, leftModel), (.right, rightModel)]
+
+        for (speaker, model) in speakers {
+            let ownPosts = transcript
+                .filter { $0.speaker == speaker }
+                .map(\.text)
+                .joined(separator: "\n- ")
+
+            guard !ownPosts.isEmpty else { continue }
+
+            let summaryPrompt = """
+You are writing your final summary in a two-model discussion.
+Topic: \(topic)
+Summarize your own contributions in 3-5 bullet points.
+Do not add new ideas beyond your earlier posts.
+
+Your posts:
+- \(ownPosts)
+"""
+
+            let requestMessages: [ConversationMessage] = [
+                .init(role: .system, speaker: .system, text: "Provide a concise final summary."),
+                .init(role: .user, speaker: .system, text: summaryPrompt)
+            ]
+
+            do {
+                let summary = try await ollama.chat(model: model, messages: requestMessages)
+                let finalText = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+                appendMessage(.init(
+                    role: .assistant,
+                    speaker: speaker,
+                    text: finalText.isEmpty ? "(Summary unavailable)" : "Final summary:\n\(finalText)"
+                ))
+            } catch {
+                appendMessage(.init(
+                    role: .system,
+                    speaker: .system,
+                    text: "Failed to generate \(speaker.rawValue) summary: \(error.localizedDescription)"
+                ))
+            }
+        }
     }
 
     private func displayName(for format: TranscriptSaveFormat) -> String {
