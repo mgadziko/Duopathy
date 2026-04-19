@@ -1,2 +1,2 @@
 # Duopathy
-LLM to LLM Chat
+LLM to LLM Chat with Ollama
