@@ -141,6 +141,19 @@ struct ContentView: View {
             }
 
             HStack(spacing: 14) {
+                Text("Topic")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                TextField("Enter conversation topic", text: $viewModel.topic)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 460)
+                    .disabled(viewModel.isRunning)
+
+                Spacer()
+            }
+
+            HStack(spacing: 14) {
                 Text("Posts Per Side")
                     .font(.caption)
                     .foregroundStyle(.secondary)

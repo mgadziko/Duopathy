@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import UniformTypeIdentifiers
 
 struct ConversationMessage: Identifiable, Hashable, Codable {
     enum Role: String, Codable {
@@ -38,11 +39,18 @@ enum ConversationLengthOption: String, CaseIterable, Identifiable {
     }
 }
 
+private enum TranscriptSaveFormat: CaseIterable {
+    case json
+    case txt
+    case html
+}
+
 private struct TranscriptFile: Codable {
     let exportedAt: Date
     let leftModel: String
     let rightModel: String
     let postsPerSide: Int
+    let topic: String
     let messages: [ConversationMessage]
 }
 
@@ -51,6 +59,7 @@ final class ConversationViewModel: ObservableObject {
     @Published var models: [OllamaModel] = []
     @Published var leftModel: String = ""
     @Published var rightModel: String = ""
+    @Published var topic: String = ""
     @Published var messages: [ConversationMessage] = []
     @Published var isRunning = false
     @Published var statusText = "Idle"
@@ -115,9 +124,22 @@ final class ConversationViewModel: ObservableObject {
         }
 
         let panel = NSSavePanel()
-        panel.allowedContentTypes = [.json]
+        panel.allowedContentTypes = [.json, .plainText, .html]
         panel.canCreateDirectories = true
         panel.nameFieldStringValue = "duopathy-transcript-\(timestamp()).json"
+        panel.allowsOtherFileTypes = false
+        panel.isExtensionHidden = false
+
+        let formatPopup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 180, height: 24), pullsDown: false)
+        formatPopup.addItems(withTitles: TranscriptSaveFormat.allCases.map { displayName(for: $0).uppercased() })
+        formatPopup.selectItem(at: 0)
+
+        let formatLabel = NSTextField(labelWithString: "Format:")
+        let accessory = NSStackView(views: [formatLabel, formatPopup])
+        accessory.orientation = .horizontal
+        accessory.alignment = .centerY
+        accessory.spacing = 8
+        panel.accessoryView = accessory
 
         guard panel.runModal() == .OK, let url = panel.url else {
             statusText = "Save canceled"
@@ -129,13 +151,17 @@ final class ConversationViewModel: ObservableObject {
             leftModel: leftModel,
             rightModel: rightModel,
             postsPerSide: resolvedMessageLimit(),
+            topic: resolvedTopic(),
             messages: messages
         )
 
         do {
-            let data = try JSONEncoder.pretty.encode(payload)
-            try data.write(to: url, options: .atomic)
-            statusText = "Saved transcript"
+            let selectedIndex = max(0, formatPopup.indexOfSelectedItem)
+            let format = TranscriptSaveFormat.allCases[min(selectedIndex, TranscriptSaveFormat.allCases.count - 1)]
+            let finalURL = url.deletingPathExtension().appendingPathExtension(fileExtension(for: format))
+            let data = try encodedTranscript(payload, format: format)
+            try data.write(to: finalURL, options: .atomic)
+            statusText = "Saved transcript (\(displayName(for: format)))"
         } catch {
             statusText = "Save failed: \(error.localizedDescription)"
         }
@@ -162,6 +188,7 @@ final class ConversationViewModel: ObservableObject {
             let transcript = try JSONDecoder.transcript.decode(TranscriptFile.self, from: data)
             leftModel = transcript.leftModel
             rightModel = transcript.rightModel
+            topic = transcript.topic
             messages = transcript.messages
             transcriptRevision += 1
             statusText = "Transcript loaded"
@@ -182,6 +209,8 @@ final class ConversationViewModel: ObservableObject {
             return
         }
 
+        let foundationTopic = resolvedTopic()
+
         messages.removeAll()
         transcriptRevision += 1
         statusText = "Running \(limitPerSide) posts per side..."
@@ -189,7 +218,7 @@ final class ConversationViewModel: ObservableObject {
         shouldStop = false
 
         conversationTask = Task {
-            await runConversation(limitPerSide: limitPerSide)
+            await runConversation(limitPerSide: limitPerSide, topic: foundationTopic)
         }
     }
 
@@ -198,6 +227,11 @@ final class ConversationViewModel: ObservableObject {
             return fixed
         }
         return Int(customMessageLimitInput) ?? 0
+    }
+
+    private func resolvedTopic() -> String {
+        let trimmed = topic.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "General discussion" : trimmed
     }
 
     private func appendMessage(_ message: ConversationMessage) {
@@ -221,10 +255,10 @@ final class ConversationViewModel: ObservableObject {
         messages.first(where: { $0.id == id })?.text ?? ""
     }
 
-    private func runConversation(limitPerSide: Int) async {
-        let starterPrompt = "Introduce yourself in one sentence and ask one interesting question."
+    private func runConversation(limitPerSide: Int, topic: String) async {
+        let starterPrompt = "The topic is: \(topic). Introduce yourself in one sentence and ask one interesting question about this topic."
 
-        appendMessage(.init(role: .system, speaker: .system, text: "Conversation started. Left model: \(leftModel), Right model: \(rightModel), \(limitPerSide) posts per side."))
+        appendMessage(.init(role: .system, speaker: .system, text: "Conversation started. Topic: \(topic). Left model: \(leftModel), Right model: \(rightModel), \(limitPerSide) posts per side."))
 
         var transcript: [ConversationMessage] = []
         var nextSpeaker: ConversationMessage.Speaker = .left
@@ -249,7 +283,9 @@ final class ConversationViewModel: ObservableObject {
             let activeModel = (nextSpeaker == .left) ? leftModel : rightModel
             let passiveSpeaker = (nextSpeaker == .left) ? "RIGHT" : "LEFT"
 
-            var prompt = "You are model \(nextSpeaker.rawValue.uppercased()) in a two-model chat. Keep replies short (1-3 sentences). End with a question for \(passiveSpeaker)."
+            var prompt = "You are model \(nextSpeaker.rawValue.uppercased()) in a two-model chat."
+            prompt += " The foundation topic is: \(topic). Stay on-topic throughout the dialog."
+            prompt += " Keep replies short (1-3 sentences). End with a question for \(passiveSpeaker)."
             prompt += "\n\nMost recent message to respond to:\n\(seedText)"
 
             let contextWindow = transcript.suffix(14)
@@ -303,6 +339,101 @@ final class ConversationViewModel: ObservableObject {
         appendMessage(.init(role: .system, speaker: .system, text: "Conversation completed. Left posted \(leftPosts), right posted \(rightPosts)."))
         statusText = "Completed"
         isRunning = false
+    }
+
+    private func displayName(for format: TranscriptSaveFormat) -> String {
+        switch format {
+        case .json: return "json"
+        case .txt: return "txt"
+        case .html: return "html"
+        }
+    }
+
+    private func fileExtension(for format: TranscriptSaveFormat) -> String {
+        switch format {
+        case .json: return "json"
+        case .txt: return "txt"
+        case .html: return "html"
+        }
+    }
+
+    private func encodedTranscript(_ payload: TranscriptFile, format: TranscriptSaveFormat) throws -> Data {
+        switch format {
+        case .json:
+            return try JSONEncoder.pretty.encode(payload)
+        case .txt:
+            return plainTextTranscript(payload).data(using: .utf8) ?? Data()
+        case .html:
+            return htmlTranscript(payload).data(using: .utf8) ?? Data()
+        }
+    }
+
+    private func plainTextTranscript(_ payload: TranscriptFile) -> String {
+        let dateString = ISO8601DateFormatter().string(from: payload.exportedAt)
+        var lines: [String] = [
+            "Duopathy Transcript",
+            "Exported: \(dateString)",
+            "Topic: \(payload.topic)",
+            "Left Model: \(payload.leftModel)",
+            "Right Model: \(payload.rightModel)",
+            "Posts Per Side: \(payload.postsPerSide)",
+            "",
+            "Messages:",
+            ""
+        ]
+
+        for message in payload.messages {
+            lines.append("[\(message.speaker.rawValue.uppercased())] \(message.text)")
+            lines.append("")
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    private func htmlTranscript(_ payload: TranscriptFile) -> String {
+        let dateString = ISO8601DateFormatter().string(from: payload.exportedAt)
+        let messageBlocks = payload.messages.map { message in
+            let speaker = htmlEscaped(message.speaker.rawValue.uppercased())
+            let body = htmlEscaped(message.text).replacingOccurrences(of: "\n", with: "<br>")
+            return "<div class=\"msg\"><div class=\"speaker\">\(speaker)</div><div>\(body)</div></div>"
+        }.joined(separator: "\n")
+
+        return """
+<!doctype html>
+<html>
+<head>
+  <meta charset=\"utf-8\">
+  <title>Duopathy Transcript</title>
+  <style>
+    body { font-family: -apple-system, Helvetica, Arial, sans-serif; margin: 24px; }
+    .meta { margin-bottom: 20px; }
+    .meta div { margin: 2px 0; }
+    .msg { border: 1px solid #ddd; border-radius: 10px; padding: 10px; margin-bottom: 10px; }
+    .speaker { font-size: 12px; color: #666; margin-bottom: 6px; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <h1>Duopathy Transcript</h1>
+  <div class=\"meta\">
+    <div><strong>Exported:</strong> \(htmlEscaped(dateString))</div>
+    <div><strong>Topic:</strong> \(htmlEscaped(payload.topic))</div>
+    <div><strong>Left Model:</strong> \(htmlEscaped(payload.leftModel))</div>
+    <div><strong>Right Model:</strong> \(htmlEscaped(payload.rightModel))</div>
+    <div><strong>Posts Per Side:</strong> \(payload.postsPerSide)</div>
+  </div>
+  \(messageBlocks)
+</body>
+</html>
+"""
+    }
+
+    private func htmlEscaped(_ text: String) -> String {
+        text
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "'", with: "&#39;")
     }
 
     private func timestamp() -> String {
