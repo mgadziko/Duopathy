@@ -227,15 +227,17 @@ final class ConversationViewModel: ObservableObject {
         }
 
         let foundationTopic = resolvedTopic()
+        let seedTranscript = priorDialogueContext()
 
-        messages.removeAll()
         transcriptRevision += 1
-        statusText = "Running \(limitPerSide) posts per side..."
+        statusText = seedTranscript.isEmpty
+            ? "Running \(limitPerSide) posts per side..."
+            : "Running \(limitPerSide) posts per side (seeded by \(seedTranscript.count) prior posts)..."
         isRunning = true
         shouldStop = false
 
         conversationTask = Task {
-            await runConversation(limitPerSide: limitPerSide, topic: foundationTopic)
+            await runConversation(limitPerSide: limitPerSide, topic: foundationTopic, seedTranscript: seedTranscript)
         }
     }
 
@@ -272,14 +274,23 @@ final class ConversationViewModel: ObservableObject {
         messages.first(where: { $0.id == id })?.text ?? ""
     }
 
-    private func runConversation(limitPerSide: Int, topic: String) async {
+    private func priorDialogueContext() -> [ConversationMessage] {
+        messages.filter { $0.speaker == .left || $0.speaker == .right }
+    }
+
+    private func runConversation(limitPerSide: Int, topic: String, seedTranscript: [ConversationMessage]) async {
         let starterPrompt = "The topic is: \(topic). Introduce yourself in one sentence and ask one interesting question about this topic."
 
-        appendMessage(.init(role: .system, speaker: .system, text: "Conversation started. Topic: \(topic). Left model: \(leftModel), Right model: \(rightModel), \(limitPerSide) posts per side."))
+        appendMessage(.init(
+            role: .system,
+            speaker: .system,
+            text: "Conversation started. Topic: \(topic). Left model: \(leftModel), Right model: \(rightModel), \(limitPerSide) posts per side. Seed posts: \(seedTranscript.count)."
+        ))
 
-        var transcript: [ConversationMessage] = []
+        var transcriptContext: [ConversationMessage] = seedTranscript
+        var currentRunPosts: [ConversationMessage] = []
         var nextSpeaker: ConversationMessage.Speaker = .left
-        var seedText = starterPrompt
+        var seedText = seedTranscript.last?.text ?? starterPrompt
         var leftPosts = 0
         var rightPosts = 0
 
@@ -305,7 +316,7 @@ final class ConversationViewModel: ObservableObject {
             prompt += " Keep replies short (1-3 sentences). End with a question for \(passiveSpeaker)."
             prompt += "\n\nMost recent message to respond to:\n\(seedText)"
 
-            let contextWindow = transcript.suffix(14)
+            let contextWindow = transcriptContext.suffix(14)
             var requestMessages: [ConversationMessage] = [
                 .init(role: .system, speaker: .system, text: prompt)
             ]
@@ -328,7 +339,8 @@ final class ConversationViewModel: ObservableObject {
                 updateMessageText(id: placeholder.id, text: safeText)
 
                 let committed = ConversationMessage(id: placeholder.id, role: .assistant, speaker: nextSpeaker, text: safeText)
-                transcript.append(committed)
+                transcriptContext.append(committed)
+                currentRunPosts.append(committed)
                 seedText = safeText
 
                 if nextSpeaker == .left {
@@ -353,7 +365,7 @@ final class ConversationViewModel: ObservableObject {
             nextSpeaker = (nextSpeaker == .left) ? .right : .left
         }
 
-        await appendFinalSummaries(topic: topic, transcript: transcript)
+        await appendFinalSummaries(topic: topic, transcript: currentRunPosts)
         appendMessage(.init(role: .system, speaker: .system, text: "Conversation completed. Left posted \(leftPosts), right posted \(rightPosts)."))
         statusText = "Completed"
         isRunning = false
