@@ -154,6 +154,14 @@ struct ContentView: View {
             }
 
             HStack(spacing: 14) {
+                Toggle("Use prior transcript as seed", isOn: $viewModel.usePriorTranscriptAsSeed)
+                    .toggleStyle(.checkbox)
+                    .disabled(viewModel.isRunning)
+
+                Spacer()
+            }
+
+            HStack(spacing: 14) {
                 Text("Posts Per Side")
                     .font(.caption)
                     .foregroundStyle(.secondary)

@@ -63,6 +63,7 @@ final class ConversationViewModel: ObservableObject {
     @Published var messages: [ConversationMessage] = []
     @Published var isRunning = false
     @Published var statusText = "Idle"
+    @Published var usePriorTranscriptAsSeed = true
     @Published var lengthOption: ConversationLengthOption = .ten
     @Published var customMessageLimitInput = "10"
     @Published var transcriptRevision = 0
@@ -227,7 +228,7 @@ final class ConversationViewModel: ObservableObject {
         }
 
         let foundationTopic = resolvedTopic()
-        let seedTranscript = priorDialogueContext()
+        let seedTranscript = usePriorTranscriptAsSeed ? priorDialogueContext() : []
 
         transcriptRevision += 1
         statusText = seedTranscript.isEmpty
