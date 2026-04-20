@@ -1,4 +1,4 @@
 # Duopathy
 LLM to LLM Chat with Ollama
 
-An xcode project for a macOS application allowing two Ollama sessions to chat. Pull downs allow selection of the LLMs, and the number of post before they summarize their stance. Context is preserved between sessions by saving and loading the transcript.
+An xcode project for a macOS application allowing two Ollama sessions to chat. Pull downs allow selection of the LLMs, and the number of posts before they summarize their stance. Context is preserved between sessions by saving and loading the transcript.
