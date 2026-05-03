@@ -154,6 +154,82 @@ struct ContentView: View {
             }
 
             HStack(spacing: 14) {
+                Text("Ollama Server")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                TextField("http://127.0.0.1:11434", text: $viewModel.ollamaBaseURLInput)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 460)
+                    .disabled(viewModel.isRunning || viewModel.isScanningForOllamaServers)
+
+                Button("Apply") {
+                    viewModel.applyOllamaBaseURL()
+                }
+                .disabled(viewModel.isRunning || viewModel.isScanningForOllamaServers)
+
+                if viewModel.isScanningForOllamaServers {
+                    Button("Stop Scan") {
+                        viewModel.stopScanningForOllamaServers()
+                    }
+                } else {
+                    Button("Scan Local Network") {
+                        viewModel.scanForOllamaServers()
+                    }
+                    .disabled(viewModel.isRunning)
+                }
+
+                Spacer()
+            }
+
+            if viewModel.isScanningForOllamaServers {
+                HStack(spacing: 10) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Scanning local network for Ollama servers...")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
+            }
+
+            if !viewModel.discoveredOllamaServers.isEmpty {
+                HStack(alignment: .top, spacing: 14) {
+                    Text("Discovered")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(viewModel.discoveredOllamaServers, id: \.absoluteString) { server in
+                                Button {
+                                    viewModel.useDiscoveredServer(server)
+                                } label: {
+                                    HStack {
+                                        Text(server.absoluteString)
+                                            .font(.caption.monospaced())
+                                        if server.absoluteString == viewModel.ollamaBaseURLInput {
+                                            Text("(selected)")
+                                                .font(.caption2)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        Spacer()
+                                    }
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
+                    .frame(maxHeight: 96)
+                    .padding(8)
+                    .background(Color(nsColor: .textBackgroundColor))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                    Spacer()
+                }
+            }
+
+            HStack(spacing: 14) {
                 Toggle("Use prior transcript as seed", isOn: $viewModel.usePriorTranscriptAsSeed)
                     .toggleStyle(.checkbox)
                     .disabled(viewModel.isRunning)

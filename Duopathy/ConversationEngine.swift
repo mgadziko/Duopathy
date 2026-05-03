@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 import UniformTypeIdentifiers
+import Darwin
 
 struct ConversationMessage: Identifiable, Hashable, Codable {
     enum Role: String, Codable {
@@ -67,10 +68,14 @@ final class ConversationViewModel: ObservableObject {
     @Published var lengthOption: ConversationLengthOption = .ten
     @Published var customMessageLimitInput = "10"
     @Published var transcriptRevision = 0
+    @Published var ollamaBaseURLInput: String = "http://127.0.0.1:11434"
+    @Published var discoveredOllamaServers: [URL] = []
+    @Published var isScanningForOllamaServers = false
 
     private var shouldStop = false
     private var conversationTask: Task<Void, Never>?
-    private let ollama: OllamaService
+    private var discoveryTask: Task<Void, Never>?
+    private var ollama: OllamaService
 
     init(ollama: OllamaService = OllamaService()) {
         self.ollama = ollama
@@ -87,7 +92,51 @@ final class ConversationViewModel: ObservableObject {
         messages.filter { $0.speaker == .right }.count
     }
 
+    func applyOllamaBaseURL() {
+        guard let url = URL(string: ollamaBaseURLInput.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            statusText = "Invalid Ollama URL"
+            return
+        }
+
+        ollama = OllamaService(baseURL: url)
+        Task { await refreshModels() }
+    }
+
+    func useDiscoveredServer(_ url: URL) {
+        ollamaBaseURLInput = url.absoluteString
+        applyOllamaBaseURL()
+    }
+
+    func scanForOllamaServers() {
+        guard !isScanningForOllamaServers else { return }
+
+        discoveryTask?.cancel()
+        discoveredOllamaServers = []
+        isScanningForOllamaServers = true
+        statusText = "Scanning for Ollama..."
+
+        discoveryTask = Task { [weak self] in
+            let servers = await OllamaServerDiscovery.scan(port: 11434)
+            await MainActor.run {
+                guard let self else { return }
+                self.discoveredOllamaServers = servers
+                self.isScanningForOllamaServers = false
+                self.statusText = servers.isEmpty
+                    ? "No Ollama servers found"
+                    : "Found \(servers.count) Ollama server\(servers.count == 1 ? "" : "s")"
+            }
+        }
+    }
+
+    func stopScanningForOllamaServers() {
+        discoveryTask?.cancel()
+        discoveryTask = nil
+        isScanningForOllamaServers = false
+        statusText = "Scan stopped"
+    }
+
     func refreshModels() async {
+        applyOllamaBaseURLIfNeeded()
         statusText = "Loading models..."
         do {
             let fetched = try await ollama.listModels()
@@ -240,6 +289,13 @@ final class ConversationViewModel: ObservableObject {
         conversationTask = Task {
             await runConversation(limitPerSide: limitPerSide, topic: foundationTopic, seedTranscript: seedTranscript)
         }
+    }
+
+    private func applyOllamaBaseURLIfNeeded() {
+        guard let currentURL = URL(string: ollamaBaseURLInput.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            return
+        }
+        ollama = OllamaService(baseURL: currentURL)
     }
 
     private func resolvedMessageLimit() -> Int {
@@ -532,5 +588,123 @@ private extension JSONDecoder {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         return decoder
+    }
+}
+
+private enum OllamaServerDiscovery {
+    static func scan(port: Int) async -> [URL] {
+        let hosts = candidateHosts()
+        guard !hosts.isEmpty else { return [] }
+
+        return await withTaskGroup(of: URL?.self) { group in
+            for host in hosts {
+                group.addTask {
+                    await probe(host: host, port: port)
+                }
+            }
+
+            var servers: [URL] = []
+            for await url in group {
+                if Task.isCancelled {
+                    group.cancelAll()
+                    break
+                }
+                if let url {
+                    servers.append(url)
+                }
+            }
+
+            return servers.sorted { $0.absoluteString < $1.absoluteString }
+        }
+    }
+
+    private static func probe(host: String, port: Int) async -> URL? {
+        guard let baseURL = URL(string: "http://\(host):\(port)") else { return nil }
+        let tagsURL = baseURL.appendingPathComponent("api/tags")
+        var request = URLRequest(url: tagsURL)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 0.75
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 0.75
+        configuration.timeoutIntervalForResource = 0.75
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+
+        do {
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+                return nil
+            }
+
+            struct TagsResponse: Decodable {
+                let models: [OllamaModel]
+            }
+
+            _ = try JSONDecoder().decode(TagsResponse.self, from: data)
+            return baseURL
+        } catch {
+            return nil
+        }
+    }
+
+    private static func candidateHosts() -> [String] {
+        let interfaceAddresses = localIPv4Addresses()
+            .filter { !$0.hasPrefix("127.") && !$0.hasPrefix("169.254.") }
+
+        let subnets = Set(interfaceAddresses.compactMap(subnetPrefix))
+        var hosts = Set<String>()
+
+        for subnet in subnets {
+            for hostID in 1...254 {
+                hosts.insert("\(subnet).\(hostID)")
+            }
+        }
+
+        for address in interfaceAddresses {
+            hosts.insert(address)
+        }
+
+        return Array(hosts)
+    }
+
+    private static func subnetPrefix(for address: String) -> String? {
+        let parts = address.split(separator: ".")
+        guard parts.count == 4 else { return nil }
+        return parts.prefix(3).joined(separator: ".")
+    }
+
+    private static func localIPv4Addresses() -> [String] {
+        var addresses: [String] = []
+        var ifaddrPointer: UnsafeMutablePointer<ifaddrs>?
+
+        guard getifaddrs(&ifaddrPointer) == 0, let first = ifaddrPointer else { return [] }
+        defer { freeifaddrs(ifaddrPointer) }
+
+        var pointer = first
+        while true {
+            let interface = pointer.pointee
+            let family = interface.ifa_addr.pointee.sa_family
+            if family == UInt8(AF_INET) {
+                var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                let result = getnameinfo(
+                    interface.ifa_addr,
+                    socklen_t(interface.ifa_addr.pointee.sa_len),
+                    &hostname,
+                    socklen_t(hostname.count),
+                    nil,
+                    0,
+                    NI_NUMERICHOST
+                )
+                if result == 0 {
+                    addresses.append(String(cString: hostname))
+                }
+            }
+
+            guard let next = interface.ifa_next else { break }
+            pointer = next
+        }
+
+        return addresses
     }
 }
